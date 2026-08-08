@@ -1,3 +1,4 @@
 groq
 pydantic 
 python-dotenv
+chromadb

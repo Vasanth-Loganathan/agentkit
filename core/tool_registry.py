@@ -1,6 +1,10 @@
 import inspect
 from typing import Callable, Any, Dict, List
 from pydantic import create_model
+from core.logging import get_logger
+
+
+logger = get_logger("tool_registry")
 
 
 class ToolRegistry:
@@ -53,6 +57,7 @@ class ToolRegistry:
 
         self._tools[name] = func
         self._schemas.append(tool_schema)
+        logger.debug("Registered tool %s", name)
         return func
 
     def get_schemas(self) -> List[Dict[str, Any]]:
@@ -62,10 +67,14 @@ class ToolRegistry:
     def execute(self, name: str, kwargs: Dict[str, Any]) -> str:
         """Executes a registered tool by name with keyword arguments."""
         if name not in self._tools:
+            logger.warning("Attempted to execute unregistered tool %s", name)
             return f"Error: Tool '{name}' is not registered."
 
+        logger.info("Executing registered tool %s with kwargs %s", name, kwargs)
         try:
             result = self._tools[name](**kwargs)
+            logger.debug("Tool %s completed successfully", name)
             return str(result)
         except Exception as e:
+            logger.exception("Tool %s failed", name)
             return f"Error executing tool '{name}': {str(e)}"

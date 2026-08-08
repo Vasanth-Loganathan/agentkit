@@ -1,9 +1,15 @@
 import os
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
-from groq import Groq
+from core.logging import get_logger
+
+try:
+    from groq import Groq
+except ImportError:  # pragma: no cover - handled for test environments
+    Groq = None
 
 load_dotenv()
+logger = get_logger("llm_client")
 
 
 class LLMClient:
@@ -13,8 +19,11 @@ class LLMClient:
         api_key = os.getenv("GROQ_API_KEY")
         if not api_key:
             raise ValueError("GROQ_API_KEY not found in environment variables.")
+        if Groq is None:
+            raise ImportError("groq package is required to use LLMClient")
         self.client = Groq(api_key=api_key)
         self.model_name = model_name
+        logger.debug("Initialized LLMClient with model %s", model_name)
 
     def generate(
         self,
@@ -35,5 +44,7 @@ class LLMClient:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
 
+        logger.debug("Generating LLM response for %s messages", len(messages))
         response = self.client.chat.completions.create(**kwargs)
+        logger.debug("Received LLM response")
         return response.choices[0].message
