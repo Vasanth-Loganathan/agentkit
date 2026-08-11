@@ -1,23 +1,32 @@
 import os
+import hashlib
+import json
 from typing import List, Dict, Any, Optional
-import chromadb
+import lancedb
+from lancedb.pydantic import LanceModel, Vector
+from lancedb.embeddings import get_registry
 
+# 1. Pull the standard lightweight model from the registry
+embed_func = get_registry().get("sentence-transformers").create(name="BAAI/bge-small-en-v1.5", device="cpu")
+
+# 2. Define the exact schema so LanceDB knows which field to auto-embed
+class KnowledgeSchema(LanceModel):
+    id: str
+    text: str = embed_func.SourceField()
+    vector: Vector(embed_func.ndims()) = embed_func.VectorField() # type: ignore
+    metadata: str
 
 class LongTermMemory:
-    """Vector-backed long-term memory store with disk persistence using ChromaDB."""
+    """Vector-backed long-term memory store with disk persistence using LanceDB."""
 
     def __init__(
         self,
-        collection_name: str = "agent_knowledge",
-        persist_dir: str = "./chroma_db",
+        table_name: str = "agent_knowledge",
+        persist_dir: str = "./lancedb_data",
     ):
-        """Initializes ChromaDB with disk persistence.
-
-        All embeddings and metadata are saved to disk in `persist_dir` and restored across runs.
-        """
+        self.table_name = table_name
         self.persist_dir = persist_dir
-        self.client = chromadb.PersistentClient(path=self.persist_dir)
-        self.collection = self.client.get_or_create_collection(name=collection_name)
+        self.db = lancedb.connect(self.persist_dir)
 
     def add_documents(
         self,
@@ -25,27 +34,66 @@ class LongTermMemory:
         metadatas: Optional[List[Dict[str, Any]]] = None,
         ids: Optional[List[str]] = None,
     ):
-        """Embeds and indexes text chunks into the vector store."""
-        if not ids:
-            ids = [f"doc_{i}_{abs(hash(doc))}" for i, doc in enumerate(documents)]
+        if not documents:
+            return
 
-        self.collection.add(
-            documents=documents,
-            metadatas=metadatas,
-            ids=ids,
-        )
+        # Generate IDs and format metadata safely
+        if not ids:
+            ids = [f"doc_{hashlib.md5(doc.encode('utf-8')).hexdigest()}" for doc in documents]
+        
+        if not metadatas:
+            metadatas = [{} for _ in documents]
+
+        # Notice: No manual vector math here! Just standard text dictionaries.
+        data = []
+        for i in range(len(documents)):
+            data.append({
+                "id": ids[i],
+                "text": documents[i],
+                "metadata": json.dumps(metadatas[i])
+            })
+
+        try:
+            table = self.db.open_table(self.table_name)
+            table.add(data)
+        except Exception:
+            # Create the table explicitly using our automated schema
+            self.db.create_table(self.table_name, schema=KnowledgeSchema, data=data)
+            
         print(f"🧠 [LONG-TERM MEMORY]: Saved {len(documents)} document chunk(s) to '{self.persist_dir}'.")
 
-    def search(self, query: str, top_k: int = 2) -> str:
-        """Performs vector similarity search and returns matching context chunks."""
-        results = self.collection.query(
-            query_texts=[query],
-            n_results=top_k,
-        )
+    def delete_document(self, doc_id: str):
+        """Deletes a document from the vector database by its ID."""
+        try:
+            table = self.db.open_table(self.table_name)
+            table.delete(f"id = '{doc_id}'")
+            print(f"🗑️ [LONG-TERM MEMORY]: Deleted document '{doc_id}' from LanceDB.")
+        except Exception as e:
+            print(f"❌ Failed to delete document '{doc_id}': {e}")
 
-        docs = results.get("documents", [[]])[0]
-        if not docs:
+    def update_document(self, doc_id: str, new_text: str, new_metadata: dict = None):
+        """Updates a document by deleting the old one and re-embedding the new text."""
+        self.delete_document(doc_id)
+        
+        self.add_documents(
+            documents=[new_text],
+            metadatas=[new_metadata] if new_metadata else None,
+            ids=[doc_id]
+        )
+        print(f"🔄 [LONG-TERM MEMORY]: Successfully updated document '{doc_id}'.")
+
+    def search(self, query: str, top_k: int = 2) -> str:
+        try:
+            table = self.db.open_table(self.table_name)
+        except Exception:
+            return "No relevant information found in long-term memory."
+        
+        # Notice: We can pass the raw text query directly into search() now!
+        results = table.search(query).limit(top_k).to_list()
+
+        if not results:
             return "No relevant information found in long-term memory."
 
+        docs = [res["text"] for res in results]
         formatted_results = "\n---\n".join(docs)
         return f"Relevant Long-Term Memory Results:\n{formatted_results}"

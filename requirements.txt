@@ -1,4 +1,4 @@
 groq
 pydantic 
 python-dotenv
-chromadb
+lancedb
