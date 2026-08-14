@@ -45,3 +45,5 @@ lancedb_data/
 *.lance
 *.manifest
 *.txn
+
+seed_db.py

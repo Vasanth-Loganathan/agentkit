@@ -1,5 +1,4 @@
 import os
-
 import hashlib
 import json
 import lancedb
@@ -33,7 +32,7 @@ def manual_db_control():
             data = table.to_arrow().to_pylist()
             print(f"\n📦 Total Records: {len(data)}")
             for record in data:
-                print(f"ID: {record['id']} | Text: {record['text'][:75]}...")
+                print(f"ID: {record['id']} | Metadata: {record['metadata']} | Text: {record['text'][:75]}...")
                 
         elif choice == '2':
             new_text = input("\nEnter the text for the new document: ").strip()

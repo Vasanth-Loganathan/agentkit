@@ -62,7 +62,7 @@ class LongTermMemory:
             
         print(f"🧠 [LONG-TERM MEMORY]: Saved {len(documents)} document chunk(s) to '{self.persist_dir}'.")
 
-    def delete_document(self, doc_id: str):
+    def delete(self, doc_id: str):
         """Deletes a document from the vector database by its ID."""
         try:
             table = self.db.open_table(self.table_name)
@@ -70,30 +70,31 @@ class LongTermMemory:
             print(f"🗑️ [LONG-TERM MEMORY]: Deleted document '{doc_id}' from LanceDB.")
         except Exception as e:
             print(f"❌ Failed to delete document '{doc_id}': {e}")
+            raise e
 
-    def update_document(self, doc_id: str, new_text: str, new_metadata: dict = None):
+    def update(self, doc_id: str, text: str, metadata: dict = None):
         """Updates a document by deleting the old one and re-embedding the new text."""
-        self.delete_document(doc_id)
+        self.delete(doc_id)
         
         self.add_documents(
-            documents=[new_text],
-            metadatas=[new_metadata] if new_metadata else None,
+            documents=[text],
+            metadatas=[metadata] if metadata else None,
             ids=[doc_id]
         )
         print(f"🔄 [LONG-TERM MEMORY]: Successfully updated document '{doc_id}'.")
 
-    def search(self, query: str, top_k: int = 2) -> str:
+    def search(self, query: str, top_k: int = 4) -> str:
         try:
             table = self.db.open_table(self.table_name)
         except Exception:
             return "No relevant information found in long-term memory."
         
-        # Notice: We can pass the raw text query directly into search() now!
         results = table.search(query).limit(top_k).to_list()
 
         if not results:
             return "No relevant information found in long-term memory."
 
-        docs = [res["text"] for res in results]
+        docs = [f"ID: {res['id']} | Content: {res['text']}" for res in results]
         formatted_results = "\n---\n".join(docs)
+        
         return f"Relevant Long-Term Memory Results:\n{formatted_results}"

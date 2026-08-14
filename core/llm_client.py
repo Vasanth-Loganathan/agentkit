@@ -15,7 +15,7 @@ logger = get_logger("llm_client")
 class LLMClient:
     """Raw API client wrapper around Groq's chat completions for LLM execution."""
 
-    def __init__(self, model_name: str = "llama-3.3-70b-versatile"):
+    def __init__(self, model_name: str = "openai/gpt-oss-20b"):
         api_key = os.getenv("GROQ_API_KEY")
         if not api_key:
             raise ValueError("GROQ_API_KEY not found in environment variables.")
@@ -37,6 +37,7 @@ class LLMClient:
         kwargs = {
             "model": self.model_name,
             "messages": messages,
+            "temperature": 0.3,
         }
 
         # Only attach tools parameter if tool schemas exist

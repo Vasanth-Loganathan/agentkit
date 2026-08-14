@@ -104,7 +104,7 @@ Each phase produces a working, independently testable module. No phase is consid
 - **Test criteria:** run a long multi-turn conversation that would overflow a raw context window without this component, and confirm it stays coherent and within budget
 
 ### Phase 4 — `long_term` memory
-- Integrate a vector store (e.g. Chroma or pgvector)
+- Integrate a vector store (LanceDB — see Section 7 for rationale)
 - Expose embedding-and-retrieval as a callable tool the agent itself can invoke, not just a backend detail
 - **Test criteria:** the agent correctly recalls a fact introduced 50+ turns earlier, after it has fallen out of short-term context
 
@@ -171,7 +171,7 @@ A thin React frontend, talking to `agentkit`/the Phase 10 application via the Fa
 - **Language:** Python (confirmed)
 - **LLM provider — Phases 1-9 (no personal data involved):** Groq free tier (confirmed, in active use) — fast inference on open-weight models with function-calling support. Google AI Studio's Gemini free tier remains a documented fallback if Groq's free catalog or rate limits become restrictive, since `LLMClient` is built as a swappable module specifically to make this kind of change low-cost (Section 7a).
 - **LLM provider — Phase 10 (real personal email data, privacy-sensitive):** to be decided at that point — either verify the then-current provider's data-usage/training-opt-out terms are acceptable, or switch to a self-hosted open-weight model (CPU-based via llama.cpp/Ollama, accepting slower inference) specifically for this phase
-- **Vector store:** Chroma (simple, local) or pgvector (if leaning on existing PostgreSQL familiarity)
+- **Vector store:** LanceDB (confirmed, in active use) — embedded, local-disk based, no server required; also handles larger datasets efficiently via its columnar Lance format as personal data accumulates over time. Chroma was the original candidate but did not work reliably in the actual dev environment, so this was switched — a low-friction change since `long_term.py` (Phase 4) is built behind its own swappable interface, same principle as `LLMClient`.
 - **API layer (Phase 10 / Phase 12 only, not the core framework):** FastAPI — `agentkit` itself (Phases 1-9) stays a plain, framework-agnostic Python library with no web-serving dependency, testable directly via function calls and pytest. FastAPI is introduced only at the application layer, once the framework needs to be exposed over HTTP to a persistent service (Phase 10) or a frontend UI (Phase 12) — e.g. endpoints like `POST /agent/run`, `GET /todos`, `GET /trace/{run_id}`.
 - **Frontend:** React, added as Phase 12 (see Section 6, Phase 12)
 - **Testing:** standard unit test framework (pytest), applied per-module as each phase is built
