@@ -37,16 +37,15 @@ class AgentLoop:
         return hashlib.sha256(canonical_str.encode("utf-8")).hexdigest()
 
     def run(self, user_prompt: str) -> Tuple[str, str]:
-        """Executes the agent loop for a prompt.
+        """Executes the agent loop for a prompt using SQLite Episodic Memory."""
+        
+        # 1. THE SYSTEM PROMPT CHECK
+        # If this is a brand new chat, inject the system prompt as the first message.
+        if len(self.short_term_memory.messages) == 0:
+            self.short_term_memory.add_message({"role": "system", "content": self.system_prompt})
 
-        Returns:
-            Tuple[status, final_response_text]
-            where status is one of: 'SUCCESS', 'STUCK_IN_LOOP', 'MAX_STEPS_REACHED'
-        """
-        messages: List[Dict[str, Any]] = [
-            {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
+        # 2. COMMIT USER INPUT TO SQLITE
+        self.short_term_memory.add_message({"role": "user", "content": user_prompt})
 
         seen_hashes: Dict[str, int] = {}
         step = 0
@@ -55,67 +54,68 @@ class AgentLoop:
             step += 1
             logger.info("Starting loop step %s/%s", step, self.max_steps)
 
-            # 0. COMPACT: Automatically manage short-term context history
-            messages = self.short_term_memory.compact_if_needed(messages)
+            # 3. HYDRATE CONTEXT (Sticky Anchor + Sliding Window)
+            messages_for_llm = self.short_term_memory.get_messages()
 
             schemas = self.tool_registry.get_schemas()
             logger.debug("Sending request to LLM with %s tool schemas", len(schemas))
-            response = self.llm_client.generate(messages, tools=schemas if schemas else None)
+            
+            # Send the carefully sized context to the LLM
+            response = self.llm_client.generate(messages_for_llm, tools=schemas if schemas else None)
 
-            # 1. EVALUATE: Check for requested tool calls
+            # 4. EVALUATE: Check for requested tool calls
             if response.tool_calls:
-                messages.append(response)
+                # Save the LLM's tool request to SQLite
+                # (Assuming response can be cast to dict or has a method to get the message format)
+                tool_request_msg = {"role": "assistant", "tool_calls": [t.model_dump() if hasattr(t, 'model_dump') else t for t in response.tool_calls]}
+                # Note: Adjust the above line based on how your llm_client structures the response object natively
+                self.short_term_memory.add_message(tool_request_msg)
 
                 for tool_call in response.tool_calls:
                     func_name = tool_call.function.name
                     raw_args = tool_call.function.arguments
 
-                    # Safely parse JSON arguments from the model
                     try:
                         args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
                     except json.JSONDecodeError as e:
-                        tool_output = f"Error: Malformed JSON arguments provided by model: {str(e)}"
-                        logger.warning("Tool call %s had malformed JSON arguments: %s", func_name, str(e))
-                        messages.append({
+                        tool_output = f"Error: Malformed JSON arguments: {str(e)}"
+                        logger.warning("Tool call %s had malformed JSON arguments", func_name)
+                        
+                        self.short_term_memory.add_message({
                             "role": "tool",
                             "tool_call_id": tool_call.id,
                             "content": tool_output,
                         })
                         continue
 
-                    # Compute state-hash for duplicate detection
+                    # Loop detection
                     call_hash = self._compute_call_hash(func_name, args)
                     seen_hashes[call_hash] = seen_hashes.get(call_hash, 0) + 1
 
-                    # 2. LOOP DETECTION CHECK
                     if seen_hashes[call_hash] >= self.loop_threshold:
-                        warning_msg = (
-                            f"Loop detected! Tool '{func_name}' with args {args} "
-                            f"has been called {seen_hashes[call_hash]} times. Breaking execution."
-                        )
-                        logger.warning("Loop detected for tool %s with args %s", func_name, args)
+                        warning_msg = f"Loop detected! Breaking execution."
+                        logger.warning(warning_msg)
                         return "STUCK_IN_LOOP", warning_msg
 
-                    # 3. ACT & OBSERVE (With Exception Recovery)
+                    # Execute Tool
                     logger.info("Executing tool %s with args %s", func_name, args)
                     try:
                         tool_output = self.tool_registry.execute(func_name, args)
                     except Exception as exc:
-                        # Catch unexpected tool runtime crashes safely
                         tool_output = f"Runtime Error executing tool '{func_name}': {str(exc)}"
 
                     logger.info("Tool %s returned: %s", func_name, tool_output)
 
-                    # Feed observation back into history
-                    messages.append({
+                    # Save the tool's observation back into SQLite
+                    self.short_term_memory.add_message({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
                         "content": tool_output,
                     })
             else:
                 # Model returned a final text response
-                messages.append({"role": "assistant", "content": response.content})
-                logger.info("Agent completed successfully with final response")
+                self.short_term_memory.add_message({"role": "assistant", "content": response.content})
+                logger.info("Agent completed successfully")
                 return "SUCCESS", response.content
 
         logger.warning("Agent reached max steps without completion")

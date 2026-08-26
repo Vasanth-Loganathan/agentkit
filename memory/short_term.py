@@ -1,68 +1,168 @@
-import os
-import sys
-from typing import List, Dict, Any, Optional
-from core.llm_client import LLMClient
-from core.logging import get_logger
-
-
-logger = get_logger("short_term_memory")
-
+import sqlite3
+import json
+import uuid
+import datetime
 
 class ShortTermMemory:
-    """Manages active conversation history and compacts middle turns when context boundaries are exceeded."""
+    """Manages context with Episodic SQLite persistence, a Sticky Anchor, and LLM Auto-Naming."""
 
-    def __init__(
-        self,
-        llm_client: LLMClient,
-        max_messages: int = 6,
-        tail_keep: int = 2,
-    ):
+    def __init__(self, llm_client, db_path="chat_history.db", max_tokens=16000):
         self.llm_client = llm_client
-        self.max_messages = max_messages
-        self.tail_keep = tail_keep
+        self.db_path = db_path
+        self.max_tokens = max_tokens
+        self.messages = []
+        self.session_id = None
+        
+        self._init_db()
 
-    def compact_if_needed(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Compacts the middle portion of conversation history if total message count exceeds max_messages."""
-        # Don't compact if history is under limit
-        if len(messages) <= self.max_messages:
-            return messages
+    def _init_db(self):
+        """Creates the tables for both sessions and messages."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Table 1: Stores the individual messages
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT,
+                role TEXT,
+                message_data TEXT,
+                timestamp DATETIME
+            )
+        ''')
+        
+        # Table 2: Stores the Session Metadata (for our beautiful menu)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS sessions (
+                session_id TEXT PRIMARY KEY,
+                title TEXT,
+                created_at DATETIME
+            )
+        ''')
+        conn.commit()
+        conn.close()
 
-        # 1. Identify Head (System Prompt + Original Goal)
-        head = messages[:2]  # messages[0] = system, messages[1] = initial user request
+    def load_session(self, session_id=None):
+        if session_id is None:
+            self.session_id = str(uuid.uuid4())[:8] 
+            self.messages = []
+            
+            # Register the new session in the database
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                'INSERT INTO sessions (session_id, title, created_at) VALUES (?, ?, ?)',
+                (self.session_id, "New Chat", datetime.datetime.now().isoformat())
+            )
+            conn.commit()
+            conn.close()
+        else:
+            self.session_id = session_id
+            self._fetch_history()
 
-        # 2. Identify Tail (Recent active turns)
-        tail = messages[-self.tail_keep:]
+    def _fetch_history(self):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('SELECT message_data FROM messages WHERE session_id = ? ORDER BY id ASC', (self.session_id,))
+        rows = cursor.fetchall()
+        conn.close()
 
-        # 3. Identify Middle turns to compress
-        middle = messages[2:-self.tail_keep]
+        self.messages = []
+        for row in rows:
+            self.messages.append(json.loads(row[0]))
 
-        if not middle:
-            return messages
+    def _generate_title(self, first_user_message: str):
+        """Uses the LLM to generate a smart title for the chat."""
+        prompt = f"Summarize the following text into a short, descriptive title of 3 to 5 words. Do not use quotes or punctuation. Text: {first_user_message}"
+        
+        # Create a temporary payload for the title generation
+        title_messages = [{"role": "user", "content": prompt}]
+        
+        try:
+            # We call the LLM directly without tools to get a fast text response
+            response = self.llm_client.generate(title_messages, tools=None)
+            new_title = response.content.strip('"\'') # Clean up any quotes
+            
+            # Update the sessions table with the new smart title
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('UPDATE sessions SET title = ? WHERE session_id = ?', (new_title, self.session_id))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            pass # If the LLM fails, it just stays "New Chat"
 
-        logger.info("Compacting %s intermediate history messages", len(middle))
+    def add_message(self, message: dict):
+        self.messages.append(message)
 
-        # Construct summarization prompt for LLM
-        summary_prompt = [
-            {
-                "role": "system",
-                "content": "You are a context compactor. Summarize the key facts, tool calls, and progress made in the provided conversation transcript into a concise paragraph. Omit unnecessary details.",
-            },
-            {
-                "role": "user",
-                "content": f"Summarize these intermediate conversation steps:\n{str(middle)}",
-            },
-        ]
+        if self.session_id:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                'INSERT INTO messages (session_id, role, message_data, timestamp) VALUES (?, ?, ?, ?)',
+                (self.session_id, message.get('role', 'unknown'), json.dumps(message), datetime.datetime.now().isoformat())
+            )
+            conn.commit()
+            conn.close()
 
-        # Generate summary using our existing LLMClient
-        summary_response = self.llm_client.generate(summary_prompt)
-        summary_text = summary_response.content if hasattr(summary_response, "content") else str(summary_response)
+            # If this is the very first user message, trigger auto-naming!
+            if message.get('role') == 'user':
+                # Check if it's the first user message by counting user roles in RAM
+                user_msgs = [m for m in self.messages if m.get('role') == 'user']
+                if len(user_msgs) == 1:
+                    self._generate_title(message.get('content'))
 
-        compacted_summary_turn = {
-            "role": "user",
-            "content": f"[PREVIOUS CONTEXT SUMMARY]: {summary_text}",
-        }
+    def get_messages(self):
+        """Sticky Anchor + Sliding Window"""
+        if not self.messages:
+            return []
 
-        # Reconstruct messages array: Head + Compacted Middle + Tail
-        reconstructed = head + [compacted_summary_turn] + tail
-        logger.info("History reduced from %s to %s turns", len(messages), len(reconstructed))
-        return reconstructed
+        remaining_budget = self.max_tokens
+        anchors, recent_window = [], []
+        start_idx = 0
+
+        if len(self.messages) > 0 and self.messages[0].get('role') == 'system':
+            anchors.append(self.messages[0])
+            remaining_budget -= (len(json.dumps(self.messages[0])) // 4)
+            start_idx = 1
+
+        if len(self.messages) > start_idx and self.messages[start_idx].get('role') == 'user':
+            anchors.append(self.messages[start_idx])
+            remaining_budget -= (len(json.dumps(self.messages[start_idx])) // 4)
+            start_idx += 1
+
+        for msg in reversed(self.messages[start_idx:]):
+            estimated_tokens = len(json.dumps(msg)) // 4
+            if remaining_budget - estimated_tokens < 0:
+                break
+            recent_window.insert(0, msg)
+            remaining_budget -= estimated_tokens
+
+        return anchors + recent_window
+
+    def get_all_sessions(self):
+        """Fetches sessions using a clean SQL JOIN."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT s.session_id, s.title, COUNT(m.id) as msg_count, MAX(m.timestamp) as last_active 
+            FROM sessions s
+            LEFT JOIN messages m ON s.session_id = m.session_id
+            GROUP BY s.session_id 
+            ORDER BY last_active DESC
+        ''')
+        
+        rows = cursor.fetchall()
+        conn.close()
+        
+        # Format timestamps nicely
+        formatted_rows = []
+        for sess_id, title, msg_count, last_active in rows:
+            time_str = "No Activity"
+            if last_active:
+                dt = datetime.datetime.fromisoformat(last_active)
+                time_str = dt.strftime("%b %d, %I:%M %p")
+            formatted_rows.append((sess_id, msg_count, time_str, title))
+            
+        return formatted_rows

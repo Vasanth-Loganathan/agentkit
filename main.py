@@ -12,17 +12,44 @@ def main():
     # 1. Initialize Memory Engines
     llm_client = LLMClient()
     
-    # Short-term memory keeps active context managed
-    short_memory = ShortTermMemory(llm_client=llm_client, max_messages=6, tail_keep=2)
+    #Short-term memory 
+    short_memory = ShortTermMemory(llm_client=LLMClient, db_path="chat_history.db", max_tokens=16000)
     
     # Long-term memory persists domain knowledge across restarts
     long_memory = LongTermMemory(table_name="knowledge_base", persist_dir="./lancedb_data")    
     
     # 2. Initialize Tool Registry and Register Tools
     registry = ToolRegistry()
-
     register_agent_tools(registry, long_memory)
     
+    # Boot Menu for Session Selection
+    sessions = short_memory.get_all_sessions()
+    
+    if not sessions:
+        print("No previous sessions found. Starting a new chat.")
+        short_memory.load_session(None)
+    else:
+        print("\n=== Previous Chat Sessions ===")
+        # Display the 5 most recent sessions
+        for i, (sess_id, msg_count, last_active) in enumerate(sessions[:5]):
+            print(f"  [{i+1}] ID: {sess_id} | Messages: {msg_count} | Last Active: {last_active}")
+        print("  [N] Start a New Chat")
+        
+        choice = input("\nSelect a session number or press 'N': ").strip().upper()
+        
+        if choice == 'N' or choice == '':
+            short_memory.load_session(None)
+            print(f"\n=> Started new session: {short_memory.session_id}")
+        else:
+            try:
+                idx = int(choice) - 1
+                selected_session = sessions[idx][0]
+                short_memory.load_session(selected_session)
+                print(f"\n=> Loaded session: {selected_session}")
+            except (ValueError, IndexError):
+                print("\n=> Invalid choice. Starting a new chat instead.")
+                short_memory.load_session(None)
+
     # 3. Wire into the Agent Loop
     agent = AgentLoop(
         llm_client=llm_client,
