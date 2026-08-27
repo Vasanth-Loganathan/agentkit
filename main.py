@@ -13,7 +13,7 @@ def main():
     llm_client = LLMClient()
     
     #Short-term memory 
-    short_memory = ShortTermMemory(llm_client=LLMClient, db_path="chat_history.db", max_tokens=16000)
+    short_memory = ShortTermMemory(llm_client=llm_client, db_path="chat_history.db", max_tokens=16000)
     
     # Long-term memory persists domain knowledge across restarts
     long_memory = LongTermMemory(table_name="knowledge_base", persist_dir="./lancedb_data")    
@@ -30,9 +30,10 @@ def main():
         short_memory.load_session(None)
     else:
         print("\n=== Previous Chat Sessions ===")
-        # Display the 5 most recent sessions
-        for i, (sess_id, msg_count, last_active) in enumerate(sessions[:5]):
-            print(f"  [{i+1}] ID: {sess_id} | Messages: {msg_count} | Last Active: {last_active}")
+        # Display the 5 most recent sessions with their Titles
+        for i, (sess_id, msg_count, last_active, title) in enumerate(sessions[:5]):
+            print(f"  [{i+1}] \"{title}\"")
+            print(f"      (ID: {sess_id} | Messages: {msg_count} | Last Active: {last_active})")
         print("  [N] Start a New Chat")
         
         choice = input("\nSelect a session number or press 'N': ").strip().upper()

@@ -2,6 +2,7 @@ import sqlite3
 import json
 import uuid
 import datetime
+import threading
 
 class ShortTermMemory:
     """Manages context with Episodic SQLite persistence, a Sticky Anchor, and LLM Auto-Naming."""
@@ -47,17 +48,11 @@ class ShortTermMemory:
             self.session_id = str(uuid.uuid4())[:8] 
             self.messages = []
             
-            # Register the new session in the database
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            cursor.execute(
-                'INSERT INTO sessions (session_id, title, created_at) VALUES (?, ?, ?)',
-                (self.session_id, "New Chat", datetime.datetime.now().isoformat())
-            )
-            conn.commit()
-            conn.close()
+            # The Magic Flag: We haven't touched the DB yet!
+            self.session_started_in_db = False 
         else:
             self.session_id = session_id
+            self.session_started_in_db = True
             self._fetch_history()
 
     def _fetch_history(self):
@@ -72,30 +67,63 @@ class ShortTermMemory:
             self.messages.append(json.loads(row[0]))
 
     def _generate_title(self, first_user_message: str):
-        """Uses the LLM to generate a smart title for the chat."""
-        prompt = f"Summarize the following text into a short, descriptive title of 3 to 5 words. Do not use quotes or punctuation. Text: {first_user_message}"
-        
-        # Create a temporary payload for the title generation
-        title_messages = [{"role": "user", "content": prompt}]
-        
-        try:
-            # We call the LLM directly without tools to get a fast text response
-            response = self.llm_client.generate(title_messages, tools=None)
-            new_title = response.content.strip('"\'') # Clean up any quotes
-            
-            # Update the sessions table with the new smart title
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            cursor.execute('UPDATE sessions SET title = ? WHERE session_id = ?', (new_title, self.session_id))
-            conn.commit()
-            conn.close()
-        except Exception as e:
-            pass # If the LLM fails, it just stays "New Chat"
+            """Runs purely in the background to force an LLM-generated title."""
+            print(f"\n[DEBUG] 🔄 Auto-namer thread started for session {self.session_id}...")
+            try:
+                prompt = f"Write a descriptive 3 to 5 word title for a chat that starts with this prompt. Only return the title, no quotes. Prompt: {first_user_message}"
+                title_messages = [{"role": "user", "content": prompt}]
+                
+                response = self.llm_client.generate(messages=title_messages, tools=None)
+                new_title = response.content.strip('"\'\n ')
+                    
+                # Open a fresh SQLite connection for the thread to avoid locks
+                conn = sqlite3.connect(self.db_path)
+                cursor = conn.cursor()
+                cursor.execute('UPDATE sessions SET title = ? WHERE session_id = ?', (new_title, self.session_id))
+                conn.commit()
+                conn.close()
+                                
+            except Exception as e:
+                pass
 
     def add_message(self, message: dict):
+        # Always add to RAM so the active Agent Loop functions normally
         self.messages.append(message)
 
-        if self.session_id:
+        if not self.session_id:
+            return
+
+        # LAZY CREATION: Don't touch SQLite until the user actually speaks!
+        if not getattr(self, 'session_started_in_db', True):
+            if message.get('role') != 'user':
+                return # It's just the System Prompt. Keep it in RAM and wait.
+                
+            # The user finally spoke! Let's lock everything into the database.
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # 1. Register the Session
+            cursor.execute(
+                'INSERT INTO sessions (session_id, title, created_at) VALUES (?, ?, ?)',
+                (self.session_id, "New Chat", datetime.datetime.now().isoformat())
+            )
+            
+            # 2. Batch-save everything currently in RAM (System Prompt + This User Message)
+            for msg in self.messages:
+                cursor.execute(
+                    'INSERT INTO messages (session_id, role, message_data, timestamp) VALUES (?, ?, ?, ?)',
+                    (self.session_id, msg.get('role', 'unknown'), json.dumps(msg), datetime.datetime.now().isoformat())
+                )
+            conn.commit()
+            conn.close()
+            
+            self.session_started_in_db = True
+            
+            # 3. Trigger the Auto-namer thread!
+            threading.Thread(target=self._generate_title, args=(message.get('content'),)).start()
+            
+        else:
+            # Standard operation for a session that is already fully active in the DB
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             cursor.execute(
@@ -104,13 +132,6 @@ class ShortTermMemory:
             )
             conn.commit()
             conn.close()
-
-            # If this is the very first user message, trigger auto-naming!
-            if message.get('role') == 'user':
-                # Check if it's the first user message by counting user roles in RAM
-                user_msgs = [m for m in self.messages if m.get('role') == 'user']
-                if len(user_msgs) == 1:
-                    self._generate_title(message.get('content'))
 
     def get_messages(self):
         """Sticky Anchor + Sliding Window"""
@@ -141,15 +162,17 @@ class ShortTermMemory:
         return anchors + recent_window
 
     def get_all_sessions(self):
-        """Fetches sessions using a clean SQL JOIN."""
+        """Fetches sessions but filters out Ghost Sessions using HAVING."""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
+        # The HAVING clause ensures we ONLY show sessions where the user actually spoke
         cursor.execute('''
             SELECT s.session_id, s.title, COUNT(m.id) as msg_count, MAX(m.timestamp) as last_active 
             FROM sessions s
-            LEFT JOIN messages m ON s.session_id = m.session_id
+            JOIN messages m ON s.session_id = m.session_id
             GROUP BY s.session_id 
+            HAVING SUM(CASE WHEN m.role = 'user' THEN 1 ELSE 0 END) > 0
             ORDER BY last_active DESC
         ''')
         

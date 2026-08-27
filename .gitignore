@@ -47,3 +47,4 @@ lancedb_data/
 *.txn
 
 seed_db.py
+chat_history.db
