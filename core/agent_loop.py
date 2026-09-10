@@ -36,7 +36,7 @@ class AgentLoop:
         canonical_str = f"{func_name}:{json.dumps(args, sort_keys=True)}"
         return hashlib.sha256(canonical_str.encode("utf-8")).hexdigest()
 
-    def run(self, user_prompt: str) -> Tuple[str, str]:
+    def run(self, user_input) -> Tuple[str, str]:
         """Executes the agent loop for a prompt using SQLite Episodic Memory."""
         
         # 1. THE SYSTEM PROMPT CHECK
@@ -45,7 +45,13 @@ class AgentLoop:
             self.short_term_memory.add_message({"role": "system", "content": self.system_prompt})
 
         # 2. COMMIT USER INPUT TO SQLITE
-        self.short_term_memory.add_message({"role": "user", "content": user_prompt})
+        # Check if it's already a dictionary (multimodal payload) or a plain string
+        if isinstance(user_input, dict):
+            formatted_message = user_input
+        else:
+            formatted_message = {"role": "user", "content": user_input}
+
+        self.short_term_memory.add_message(formatted_message)
 
         seen_hashes: Dict[str, int] = {}
         step = 0
@@ -56,13 +62,20 @@ class AgentLoop:
 
             # 3. HYDRATE CONTEXT (Sticky Anchor + Sliding Window)
             messages_for_llm = self.short_term_memory.get_messages()
+            
+            # NEW: Strip internal AgentKit keys before sending to Groq
+            clean_messages = []
+            for msg in messages_for_llm:
+                clean_msg = msg.copy()
+                clean_msg.pop('local_path', None)
+                clean_messages.append(clean_msg)
 
             schemas = self.tool_registry.get_schemas()
             logger.debug("Sending request to LLM with %s tool schemas", len(schemas))
             
-            # Send the carefully sized context to the LLM
-            response = self.llm_client.generate(messages_for_llm, tools=schemas if schemas else None)
-
+            # Send the CLEANED context to the LLM
+            response = self.llm_client.generate(clean_messages, tools=schemas if schemas else None)
+            
             # 4. EVALUATE: Check for requested tool calls
             if response.tool_calls:
                 # Save the LLM's tool request to SQLite

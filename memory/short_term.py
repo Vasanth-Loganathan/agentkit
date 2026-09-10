@@ -3,6 +3,7 @@ import json
 import uuid
 import datetime
 import threading
+import copy
 
 class ShortTermMemory:
     """Manages context with Episodic SQLite persistence, a Sticky Anchor, and LLM Auto-Naming."""
@@ -93,7 +94,18 @@ class ShortTermMemory:
         if not self.session_id:
             return
 
-        # LAZY CREATION: Don't touch SQLite until the user actually speaks!
+        db_message = copy.deepcopy(message)
+        
+        if isinstance(db_message.get('content'), list):
+            for block in db_message['content']:
+                if block.get('type') == 'image_url':
+                    # Drop the massive Base64 string and save the local file path
+                    safe_path = db_message.get('local_path', 'unknown_image.png')
+                    block['image_url']['url'] = f"local_file:{safe_path}"
+                    
+        # Remove the temporary key so it doesn't get saved to the DB
+        db_message.pop('local_path', None) 
+
         if not getattr(self, 'session_started_in_db', True):
             if message.get('role') != 'user':
                 return # It's just the System Prompt. Keep it in RAM and wait.
@@ -108,19 +120,29 @@ class ShortTermMemory:
                 (self.session_id, "New Chat", datetime.datetime.now().isoformat())
             )
             
-            # 2. Batch-save everything currently in RAM (System Prompt + This User Message)
+            # 2. Batch-save everything currently in RAM 
             for msg in self.messages:
+                save_msg = copy.deepcopy(msg)
+                if isinstance(save_msg.get('content'), list):
+                    for block in save_msg['content']:
+                        if block.get('type') == 'image_url':
+                            block['image_url']['url'] = f"local_file:{save_msg.get('local_path', 'img')}"
+                save_msg.pop('local_path', None)
+                
                 cursor.execute(
                     'INSERT INTO messages (session_id, role, message_data, timestamp) VALUES (?, ?, ?, ?)',
-                    (self.session_id, msg.get('role', 'unknown'), json.dumps(msg), datetime.datetime.now().isoformat())
+                    (self.session_id, save_msg.get('role', 'unknown'), json.dumps(save_msg), datetime.datetime.now().isoformat())
                 )
             conn.commit()
             conn.close()
             
             self.session_started_in_db = True
             
-            # 3. Trigger the Auto-namer thread!
-            threading.Thread(target=self._generate_title, args=(message.get('content'),)).start()
+            # 3. Trigger the Auto-namer thread
+            content = message.get('content')
+            text_only = next((item['text'] for item in content if item.get('type') == 'text'), "Image upload") if isinstance(content, list) else content
+            
+            threading.Thread(target=self._generate_title, args=(text_only,)).start()
             
         else:
             # Standard operation for a session that is already fully active in the DB
@@ -128,11 +150,28 @@ class ShortTermMemory:
             cursor = conn.cursor()
             cursor.execute(
                 'INSERT INTO messages (session_id, role, message_data, timestamp) VALUES (?, ?, ?, ?)',
-                (self.session_id, message.get('role', 'unknown'), json.dumps(message), datetime.datetime.now().isoformat())
+                (self.session_id, db_message.get('role', 'unknown'), json.dumps(db_message), datetime.datetime.now().isoformat())
             )
             conn.commit()
             conn.close()
 
+    def _estimate_tokens(self, msg: dict) -> int:
+        """Smarter token estimation that doesn't count raw Base64 characters."""
+        import copy
+        temp_msg = copy.deepcopy(msg)
+        image_count = 0
+        
+        # If it's a multimodal list, find the image and strip the base64 just for counting
+        if isinstance(temp_msg.get('content'), list):
+            for block in temp_msg['content']:
+                if block.get('type') == 'image_url':
+                    block['image_url']['url'] = "" 
+                    image_count += 1
+                    
+        # Calculate standard text tokens + a flat 1000 tokens per image
+        base_tokens = len(json.dumps(temp_msg)) // 4
+        return base_tokens + (image_count * 1000)
+    
     def get_messages(self):
         """Sticky Anchor + Sliding Window"""
         if not self.messages:
@@ -142,18 +181,21 @@ class ShortTermMemory:
         anchors, recent_window = [], []
         start_idx = 0
 
+        # Anchor 1: System Prompt
         if len(self.messages) > 0 and self.messages[0].get('role') == 'system':
             anchors.append(self.messages[0])
-            remaining_budget -= (len(json.dumps(self.messages[0])) // 4)
+            remaining_budget -= self._estimate_tokens(self.messages[0])
             start_idx = 1
 
+        # Anchor 2: First User Message (The Image)
         if len(self.messages) > start_idx and self.messages[start_idx].get('role') == 'user':
             anchors.append(self.messages[start_idx])
-            remaining_budget -= (len(json.dumps(self.messages[start_idx])) // 4)
+            remaining_budget -= self._estimate_tokens(self.messages[start_idx])
             start_idx += 1
 
+        # Sliding Window for Recent Messages
         for msg in reversed(self.messages[start_idx:]):
-            estimated_tokens = len(json.dumps(msg)) // 4
+            estimated_tokens = self._estimate_tokens(msg)
             if remaining_budget - estimated_tokens < 0:
                 break
             recent_window.insert(0, msg)

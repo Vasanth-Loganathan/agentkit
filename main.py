@@ -5,6 +5,7 @@ from core.agent_loop import AgentLoop
 from memory.short_term import ShortTermMemory
 from memory.long_term import LongTermMemory
 from tools import register_agent_tools
+from utils.base64encoder import encode_image
 
 def main():
     print("🚀 Booting up AgentKit...")
@@ -68,16 +69,45 @@ def main():
     # 4. Interactive Chat Loop
     while True:
         try:
-            user_input = input("\nYou: ")
-            if user_input.lower() in ['exit', 'quit']:
-                print("Shutting down AgentKit. Goodbye!")
-                break
+            user_input = input("You: ").strip()
             
-            if not user_input.strip():
-                continue
+            if user_input.lower() in ['exit', 'quit']:
+                break
+
+            # NEW: Intercept the /image command
+            if user_input.startswith("/image"):
+                # Expected format: /image path/to/pic.png Explain this diagram
+                parts = user_input.split(' ', 2)
+                
+                if len(parts) >= 2:
+                    image_path = parts[1]
+                    text_prompt = parts[2] if len(parts) > 2 else "Analyze this image."
+                    
+                    try:
+                        base64_img = encode_image(image_path)
+                        
+                        # Qwen expects this exact Multimodal Array structure
+                        message = {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": text_prompt},
+                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
+                            ],
+                            # Stash the local path so we can save it later instead of the Base64 string
+                            "local_path": image_path 
+                        }
+                    except FileNotFoundError:
+                        print(f"❌ Error: Could not find image at '{image_path}'")
+                        continue
+                else:
+                    print("❌ Error: Use format: /image <path> <prompt>")
+                    continue
+            else:
+                # Standard text-only message
+                message = {"role": "user", "content": user_input}
 
             # Run the Think-Act-Observe loop
-            status, response = agent.run(user_input)
+            status, response = agent.run(message)
             
             print(f"\nAgent [{status}]:\n{response}")
 

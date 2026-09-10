@@ -2,26 +2,22 @@ import os
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 from core.logging import get_logger
+from openai import OpenAI
 
-try:
-    from groq import Groq
-except ImportError:  # pragma: no cover - handled for test environments
-    Groq = None
 
 load_dotenv()
 logger = get_logger("llm_client")
 
 
 class LLMClient:
-    """Raw API client wrapper around Groq's chat completions for LLM execution."""
-
-    def __init__(self, model_name: str = "openai/gpt-oss-20b"):
-        api_key = os.getenv("GROQ_API_KEY")
+    def __init__(self, model_name: str = "meta/muse-glimmer-30b"):
+        api_key = os.getenv("NVIDIA_API_KEY") 
         if not api_key:
-            raise ValueError("GROQ_API_KEY not found in environment variables.")
-        if Groq is None:
-            raise ImportError("groq package is required to use LLMClient")
-        self.client = Groq(api_key=api_key)
+            raise ValueError("NVIDIA_API_KEY not found in environment variables.")
+        self.client = OpenAI(
+            api_key=api_key,
+            base_url="https://integrate.api.nvidia.com/v1"
+        )
         self.model_name = model_name
         logger.debug("Initialized LLMClient with model %s", model_name)
 
