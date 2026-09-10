@@ -10,7 +10,7 @@ from utils.base64encoder import encode_image
 class ShortTermMemory:
     """Manages context with Episodic SQLite persistence, a Sticky Anchor, and LLM Auto-Naming."""
 
-    def __init__(self, llm_client, db_path="chat_history.db", max_tokens=16000):
+    def __init__(self, llm_client, db_path="chat_history.db", max_tokens=32000):
         self.llm_client = llm_client
         self.db_path = db_path
         self.max_tokens = max_tokens

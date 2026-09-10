@@ -14,7 +14,7 @@ def main():
     llm_client = LLMClient()
     
     #Short-term memory 
-    short_memory = ShortTermMemory(llm_client=llm_client, db_path="chat_history.db", max_tokens=16000)
+    short_memory = ShortTermMemory(llm_client=llm_client, db_path="chat_history.db", max_tokens=32000)
     
     # Long-term memory persists domain knowledge across restarts
     long_memory = LongTermMemory(table_name="knowledge_base", persist_dir="./lancedb_data")    
