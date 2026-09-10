@@ -4,6 +4,8 @@ import uuid
 import datetime
 import threading
 import copy
+import os
+from utils.base64encoder import encode_image
 
 class ShortTermMemory:
     """Manages context with Episodic SQLite persistence, a Sticky Anchor, and LLM Auto-Naming."""
@@ -171,9 +173,34 @@ class ShortTermMemory:
         # Calculate standard text tokens + a flat 1000 tokens per image
         base_tokens = len(json.dumps(temp_msg)) // 4
         return base_tokens + (image_count * 1000)
+
+    def _rehydrate_message(self, msg: dict) -> dict:
+        """Converts local_file: paths back to base64 data URIs for API ingestion."""
+        import copy
+        msg_copy = copy.deepcopy(msg)
+        content = msg_copy.get("content")
+
+        if isinstance(content, list):
+            for block in content:
+                if block.get("type") == "image_url":
+                    url = block.get("image_url", {}).get("url", "")
+                    if url.startswith("local_file:"):
+                        file_path = url.replace("local_file:", "")
+                        
+                        if os.path.exists(file_path):
+                            # Use the imported utility function to get the Base64 string
+                            b64_data = encode_image(file_path)
+                            block["image_url"]["url"] = f"data:image/jpeg;base64,{b64_data}"
+                        else:
+                            # Fallback if image was moved or deleted
+                            block["type"] = "text"
+                            block["text"] = f"[Image file {os.path.basename(file_path)} not found on disk]"
+                            block.pop("image_url", None)
+                            
+        return msg_copy
     
     def get_messages(self):
-        """Sticky Anchor + Sliding Window"""
+        """Sticky Anchor + Sliding Window with Image Rehydration."""
         if not self.messages:
             return []
 
@@ -187,7 +214,7 @@ class ShortTermMemory:
             remaining_budget -= self._estimate_tokens(self.messages[0])
             start_idx = 1
 
-        # Anchor 2: First User Message (The Image)
+        # Anchor 2: First User Message
         if len(self.messages) > start_idx and self.messages[start_idx].get('role') == 'user':
             anchors.append(self.messages[start_idx])
             remaining_budget -= self._estimate_tokens(self.messages[start_idx])
@@ -201,7 +228,10 @@ class ShortTermMemory:
             recent_window.insert(0, msg)
             remaining_budget -= estimated_tokens
 
-        return anchors + recent_window
+        # Rehydrate any local_file paths in the active context window
+        raw_context = anchors + recent_window
+        return [self._rehydrate_message(m) for m in raw_context]
+    
 
     def get_all_sessions(self):
         """Fetches sessions but filters out Ghost Sessions using HAVING."""

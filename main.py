@@ -31,8 +31,7 @@ def main():
         short_memory.load_session(None)
     else:
         print("\n=== Previous Chat Sessions ===")
-        # Display the 5 most recent sessions with their Titles
-        for i, (sess_id, msg_count, last_active, title) in enumerate(sessions[:5]):
+        for i, (sess_id, msg_count, last_active, title) in enumerate(sessions):
             print(f"  [{i+1}] \"{title}\"")
             print(f"      (ID: {sess_id} | Messages: {msg_count} | Last Active: {last_active})")
         print("  [N] Start a New Chat")
@@ -48,6 +47,38 @@ def main():
                 selected_session = sessions[idx][0]
                 short_memory.load_session(selected_session)
                 print(f"\n=> Loaded session: {selected_session}")
+                print(f"\n--- Transcript for Session: {selected_session} ---")
+                for msg in short_memory.messages:
+                    role = msg.get('role')
+                    content = msg.get('content')
+                    
+                    if role == 'user':
+                        if isinstance(content, list):
+                            # Extract both the text prompt and the image path
+                            text_prompt = "[Image Upload]"
+                            img_path = ""
+                            
+                            for item in content:
+                                if item.get('type') == 'text':
+                                    text_prompt = item['text']
+                                elif item.get('type') == 'image_url':
+                                    raw_url = item.get('image_url', {}).get('url', '')
+                                    if raw_url.startswith('local_file:'):
+                                        img_path = raw_url.replace('local_file:', '')
+                            
+                            # Print both neatly
+                            if img_path:
+                                print(f"You: [Image: {img_path}] {text_prompt}")
+                            else:
+                                print(f"You: {text_prompt}")
+                                
+                        else:
+                            print(f"You: {content}")
+                            
+                    elif role == 'assistant':
+                        print(f"Agent: {content}\n")
+                print("-" * 50)
+                
             except (ValueError, IndexError):
                 print("\n=> Invalid choice. Starting a new chat instead.")
                 short_memory.load_session(None)
